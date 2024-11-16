@@ -1,0 +1,640 @@
+---
+title: "Ionosphere data with tidymodels"
+author: "Aymane Mimoun"
+date: "2024-03-20"
+output:
+  rmdformats::material:
+    fig_width: 10
+    fig_height: 10
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Ionosphere data
+
+Loading libraries we need in Machine Learning project.
+
+```{r warning=FALSE}
+library(tidymodels)
+library(tidyverse)
+```
+
+**Explanations about the data (`?Ionosphere`)**:
+
+-   This radar data was collected by a system in Goose Bay, Labrador. This system consists of a phased array of **16 high-frequency antennas** with a total transmitted power on the order of 6.4 kilowatts.
+
+-   The targets were free electrons in the ionosphere.
+
+-   **"good" radar** returns are those showing **evidence of some type of structure** in the ionosphere. **"bad" returns** are those that do not; their signals pass through the ionosphere.
+
+We load the data and remove the empty second column (only zeros in this variable)
+
+```{r, message=FALSE, warning=FALSE}
+library(mlbench)
+data("Ionosphere")
+iono <- as_tibble(Ionosphere[,-2]) 
+iono$V1 <- as.double(iono$V1) - 1
+```
+
+We get a dataframe (a tibble) of dimensions
+
+```{r, message=FALSE, warning=FALSE}
+iono %>% dim()
+```
+
+# Exploratory data analysis
+
+As a first step, we explore the structure of the dataset. We bear in mind a few possible goals:
+
+-   univariate analysis: distribution of the target variable (number of classes? imbalanced data?). Presence of missing data? Distribution of each variables (mean, dispersion...)
+
+-   bivariate analysis: Relationship between covariates or between a covariate and the target variable (correlation, prediction with simple univariate tools as simple logisitic regression...)
+
+-   multivariate analysis: dimensionality reduction PCA,([UMAP](https://umap-learn.readthedocs.io/en/latest/),...), data transformations (based on the meaning of each variable. Do we have to standardize or not? Change the units, create new variables...)
+
+```{r}
+iono %>% glimpse()
+iono %>% summary()
+```
+
+Number of NA (missing data) ?
+
+```{r}
+iono %>% summarise_all(~sum(is.na(.))) %>% unlist()
+```
+
+**There is no missing data.**
+
+### Univariate analysis
+
+Boxplot for all variables together
+
+```{r, out.width = '100%'}
+iono %>% stack() %>% ggplot(aes(x = ind, y = values)) +
+  geom_boxplot()
+```
+
+All the variables have **values between -1 and 1**. We observe **2 groups of data**: one with median values 0, another one with higher medians.
+
+Verification
+
+```{r}
+iono %>% summarize(
+    across(where(is.numeric), median)) %>% unlist()
+```
+
+Some of the medians are equal to 0. Data were (surely) normalized to force a zero median value.
+
+**The histograms**
+
+Histograms of the group with "non-zero median":
+
+```{r, fig.fullwidth=TRUE, message=FALSE, echo=FALSE}
+g1 <- paste0("V",2*(1:17) - 1)
+iono %>% dplyr::select(g1) %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()
+```
+
+Histograms of the group with "zero median":
+
+```{r, message=FALSE, echo=FALSE}
+g2 <- paste0("V",2*(2:17))
+iono %>% dplyr::select(all_of(g2)) %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()
+```
+
+We observe a kind of saturation at -1 and 1 for most variables.
+
+**Variable discrimination with respect to response variable `Class`?**
+
+We plot again the boxplots but for the separate 2 groups AND the two responses "good" and "bad".
+
+```{r}
+iono %>% dplyr::select(all_of(c(g1,"Class"))) %>%
+  gather(key = type, value = "value",1:length(g1)) %>% 
+  ggplot(aes(x = type, y=value, fill=Class)) + 
+    geom_boxplot()
+```
+
+```{r}
+iono %>% dplyr::select(all_of(c(g2,"Class"))) %>%
+  gather(key = type, value = "value",1:length(g2)) %>% 
+  ggplot(aes(x = type, y=value, fill=Class)) + 
+    geom_boxplot()
+```
+
+**Comment:** For the "bad" observations, the variables have a greater dispersion (a higher variance) for most variables. The boxplots indicate that disciminating between observations with respect to the variable at hand seem a realistic objective.
+
+### Bivariate analysis
+
+We observe a strong correlation between the first variable and the Class
+
+```{r}
+t <- iono %>% dplyr::select(V1, Class) %>% table()
+t
+```
+
+Whenever $V1 = 0$ we are in class `bad`.
+
+Using this unique variable, we can predict `bad` when `V1 = 0` and `good` when `V1 = 1`, the obtained accurary is:
+
+```{r}
+sum(diag(t))/sum(t)
+```
+
+We plot the correlation matrix and highlight **5 groups of variables**. The first and the last groups contain all the "odd" variables (V3,V5,V7,...)
+
+```{r}
+library(corrplot)
+cor.table <- iono %>%  select(-Class) %>% cor()
+corrplot(cor.table, order = 'hclust', addrect = 5)
+```
+
+### Multivariate analysis: PCA
+
+We close this exploratory analysis by a classic PCA. Our goal is to highlight a potential simpler structure within the data. The correlation structure (the previous plot) show that 5 groups and so, maybe, 5 principal components, could be a reasonable choice of dimensionnality reduction.
+
+**This reduction or any other data transformation is performed in a second step only if the Machine Learning analysis in next sections give bad performances.** What means "bad performances" depend highly of the problem (the type of data, the state of the art...)
+
+```{r}
+rec <- recipe(Class ~ ., data = iono) %>%
+  step_normalize(all_predictors()) %>% 
+  step_pca(all_predictors())
+prep <- prep(rec)
+var_prop <- summary(prep$steps[[2]]$res)
+plot(cumsum(var_prop$importance[2,]), type = 'b', ylab = "percent of variance explained")
+```
+
+We explain about 60% of the data variance with 5 components. We need 12 components to explain 80% of the variables.
+
+```{r}
+cumsum(var_prop$importance[2,])[5]
+which(cumsum(var_prop$importance[2,]) > 0.8)[1]
+```
+
+**Comments:** The reduction with PCA is not an absurd idea: we can remove almost 2/3 of the data and still explain 80% of the data variance. This result is corroborated by the apparent grouping obtained in the correlation plot.
+
+# Logistic Regression
+
+We start by recalling the percent of data in each of the 2 classes (bad and good)
+
+```{r}
+prop <- iono %>% select(Class) %>% table()
+prop
+prop/sum(prop)*100
+```
+
+We don't have imbalanced data. The first very simple model (seen in previous section) using only the binary variable `V1` to predict the `Class` have accuracy of:
+
+```{r}
+sum(diag(t))/sum(t)
+```
+
+**In this section, we will test a first algorithm, the logistic regression, in order to try improving this 75% accuracy performance.**
+
+We use Cross Validation with 3 folds and the accuracy metrics (only). We have not so much data so that splitting in more folds would leave to few data for the test set.
+
+## The standard "one-step" logisitic regression
+
+In `tidymodels` package, we use:
+
+-   data with `recipe`
+
+-   method for cross validation in `vfold_cv`
+
+-   metrics in `metric_set`
+
+-   machine learning method with `set_engine`.
+
+```{r}
+recipe <- iono %>% recipe(Class ~ .)
+folds <- iono %>% vfold_cv(v = 4, strata = Class)
+my_metrics <- metric_set(accuracy, roc_auc)
+lr <- logistic_reg(mode = "classification") %>% set_engine("glm")
+```
+
+We run the algorithm and collect the result
+
+```{r}
+logistic_cv <- fit_resamples(object = lr,
+                             preprocessor = recipe,
+                             resamples = folds,
+                             metrics = my_metrics,
+                             control = control_resamples(save_pred = TRUE))
+res_log <- logistic_cv %>% collect_metrics()
+```
+
+```{r}
+res_log$mean[1]
+```
+
+**Comment: We obtain an improved result with an accuracy of about 85%.**
+
+Confusion matrix (mean on the 3 matrices obtained)
+
+```{r}
+logistic_cv %>% conf_mat_resampled(tidy = FALSE)
+```
+
+## Remark about train-test data
+
+What if we run the algorithm on the data we used to learn the classifier?
+
+```{r}
+Class.predicted <-  lr %>% fit(Class ~ ., data = iono) %>% predict(iono)
+t <- Class.predicted %>% unlist() %>% table(iono$Class)
+t
+sum(diag(t))/sum(t)
+```
+
+**we get too good performances, which does no reflect the reality of the performance.**
+
+## ROC curve
+
+On example code proposed here: <https://stateofther.github.io/finistR2019/s-tidymodels.html>
+
+We reproduce the code used in this example with our dataset.
+
+```{r}
+auc <- augment(logistic_cv) %>%
+  roc_curve(Class, .pred_bad)
+auc %>% autoplot()
+```
+
+The best model is obtained for the following threshold
+
+```{r}
+ind <- which.max(auc$specificity + auc$sensitivity)
+auc[ind,]
+```
+
+And its asssociated accuracy is
+
+```{r}
+prev <- sum(iono$Class == "good")/nrow(iono)
+(auc[ind,2]*prev + auc[ind,3]*(1-prev)) %>% unlist() %>% unname()
+```
+
+```{r}
+res_REG <- (auc[ind,2]*prev + auc[ind,3]*(1-prev)) %>% unlist() %>% unname()
+cat("accurary REG = ", res_REG)
+```
+
+**Comment: Compared to the first result (with no optimal threshold) it's a very small improvment.**
+
+# Naive Bayes
+
+## Data preparation
+
+Here we split the data in train and test. We perform cross-validation on the train dataset for tuning parameters.
+
+We use the same TRAINT/TEST/CV data for all the following algorithms.
+
+Here `smoothness` and `Laplace` are tuning parameters.
+
+```{r}
+SPLIT <- iono %>% initial_split(prop = 0.70)
+TRAIN <- SPLIT %>% training()
+TEST  <- SPLIT %>% testing()
+CV <- TRAIN %>% vfold_cv(v = 5)
+
+# data transformation / data preparation for the algo
+model_recipe <- TRAIN %>% recipe(Class ~ .)
+```
+
+## Workflow definition
+
+```{r}
+library(discrim)
+
+nb_model <- 
+  naive_Bayes(mode = "classification",
+              smoothness = tune(),
+              Laplace = tune(),
+              engine = "naivebayes"
+  )
+
+nb_wf <-
+  workflow() %>%
+  add_model(nb_model) %>% 
+  add_recipe(model_recipe)
+nb_wf
+```
+
+## Hyperparameter Tuning
+
+We test different values for hyperparameters in CV.
+
+```{r}
+nb_results <- nb_wf %>% 
+                  tune_grid(resamples = CV,
+                  metrics = metric_set(accuracy))
+
+nb_results %>% collect_metrics()
+```
+
+We return the best model
+
+```{r}
+param_final <- nb_results %>%
+  select_best(metric = "accuracy")
+
+nb_wf <- nb_wf %>%
+  finalize_workflow(param_final)
+nb_wf
+```
+
+## Apply to test data
+
+Function `last_fit` evaluation the model on testing data.
+
+```{r}
+# Last Fit
+nb_fit <- nb_wf %>% last_fit(SPLIT)
+
+test_performance <- nb_fit %>% collect_predictions()
+test_performance
+
+# Performance Metrics
+diabetes_metrics <- metric_set(accuracy, f_meas, precision, recall)
+diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+
+# Confusion Matrix
+conf_mat(test_performance, Class, .pred_class)
+```
+
+**Comment: obained accuracy of about 90%**
+
+```{r}
+res_NB <- diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+res_NB <- res_NB$.estimate[1]
+cat("accurary NB = ", res_NB)
+```
+
+# LDA
+
+We repeat the same strategy with LDA model
+
+```{r}
+library(discrim)
+
+nb_model <- 
+discrim_linear() %>%
+  set_mode("classification") %>%
+  set_engine("MASS")
+
+nb_wf <-
+  workflow() %>%
+  add_model(nb_model) %>% 
+  add_recipe(model_recipe)
+
+nb_results <- nb_wf %>% 
+                  tune_grid(resamples = CV,
+                  metrics = metric_set(accuracy))
+
+nb_results %>% collect_metrics()
+
+param_final <- nb_results %>%
+  select_best(metric = "accuracy")
+
+nb_wf <- nb_wf %>%
+  finalize_workflow(param_final)
+
+# Last Fit
+nb_fit <- nb_wf %>% last_fit(SPLIT)
+
+test_performance <- nb_fit %>% collect_predictions()
+test_performance
+
+# Performance Metrics
+diabetes_metrics <- metric_set(accuracy, f_meas, precision, recall)
+diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+
+# Confusion Matrix
+conf_mat(test_performance, Class, .pred_class)
+```
+
+```{r}
+res_LDA <- diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+res_LDA <- res_LDA$.estimate[1]
+cat("accurary LDA = ", res_LDA)
+```
+
+# KNN
+
+## Preparation of the workflow
+
+```{r}
+tune_spec <- nearest_neighbor(neighbors=tune(), weight_func="rectangular") %>%
+                set_mode("classification") %>%
+                set_engine("kknn")
+```
+
+workflow: our target is variable "Class" (with this data)
+
+```{r}
+ppv_wf <- workflow() %>%
+            add_model(tune_spec) %>%
+            add_formula(Class ~ .)
+```
+
+hyperparameter choice : here integers 1 to 50
+
+```{r}
+grille_k <- tibble(neighbors=1:20)
+```
+
+## Running the algorithm
+
+for each value of k - knn algo 5 times (cv) - each time evalute accuracy - mean of the accuracy
+
+```{r}
+ppv.cv <- ppv_wf %>%
+  tune_grid(
+    resamples = CV,
+    grid = grille_k,
+    metrics=metric_set(accuracy))
+```
+
+Analysis of the Result
+
+```{r}
+ppv.cv %>% collect_metrics() 
+
+tbl <- ppv.cv %>% collect_metrics()
+
+ggplot(tbl) +   
+  aes(x = neighbors,y = mean) + 
+  geom_line() + 
+  ylab("Accuracy")
+```
+
+## Building the best model
+
+= !!! production !!!
+
+```{r}
+best_k <- ppv.cv %>% select_best()
+best_k
+
+final_ppv <-
+   ppv_wf %>%
+   finalize_workflow(best_k) %>%
+   fit(data = TRAIN)
+
+
+########################################################
+### all predictions
+res <- predict(final_ppv, new_data = TEST)
+mean(TEST$Class == res$.pred_class)
+```
+
+```{r}
+res_KNN <- mean(TEST$Class == res$.pred_class)
+cat("accurary KNN = ", res_KNN)
+```
+
+**The best model is here the 1-KNN with 1 neighbor. This is maybe the sign that this algorithm is not a good strategy. The data are not well separated.**
+
+# SVM
+
+with radial basis kernel function.
+
+```{r}
+nb_model <-
+  svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+nb_wf <-
+  workflow() %>%
+  add_model(nb_model) %>% 
+  add_recipe(model_recipe)
+
+nb_results <- nb_wf %>% 
+                  tune_grid(resamples = CV,
+                  metrics = metric_set(accuracy))
+
+nb_results %>% collect_metrics()
+
+param_final <- nb_results %>%
+  select_best(metric = "accuracy")
+
+nb_wf <- nb_wf %>%
+  finalize_workflow(param_final)
+
+# Last Fit
+nb_fit <- nb_wf %>% last_fit(SPLIT)
+
+test_performance <- nb_fit %>% collect_predictions()
+test_performance
+
+# Performance Metrics
+diabetes_metrics <- metric_set(accuracy, f_meas, precision, recall)
+diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+
+# Confusion Matrix
+conf_mat(test_performance, Class, .pred_class)
+```
+
+```{r}
+res_SVM <- diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+res_SVM <- res_SVM$.estimate[1]
+cat("accurary SVM = ", res_SVM)
+```
+
+# Conclusion
+
+We repeat all our results:
+
+```{r, echo=FALSE}
+cat("accurary REG = ", res_REG)
+cat("accurary NB = ", res_NB)
+cat("accurary LDA = ", res_LDA)
+cat("accurary KNN = ", res_KNN)
+cat("accurary SVM = ", res_SVM)
+```
+
+and search for the best one with the highest accuracy.
+
+```{r}
+all_res <- c(res_REG, res_NB, res_LDA, res_KNN, res_SVM)
+order(all_res, decreasing = TRUE)
+which.max(all_res)
+```
+
+-   **The best method is the SVM (with radial basis kernel function) with an accuracy close to 95%**
+
+-   Notice that the dataset used for this machine learning is of small size. Only 351 observations. When repeating the analysis, the SVM returns sometimes bad accuracy performances.
+
+-   Naive Bayes Algorithm is more robust.
+
+-   We need more data to confirm our results.
+
+We run again the SVM algo but on the PCA data with 12 components (80% of the variance explained).
+
+```{r, echo = FALSE}
+rec <- recipe(~., data = iono)
+pca_trans <- rec %>%
+  step_normalize(recipes::all_numeric()) %>%
+  step_pca(recipes::all_numeric(), num_comp = 12)
+
+pca_estimates <- prep(pca_trans, training = iono)
+iono2 <- bake(pca_estimates, iono)
+
+SPLIT <- iono2 %>% initial_split(prop = 0.70)
+TRAIN <- SPLIT %>% training()
+TEST  <- SPLIT %>% testing()
+CV <- TRAIN %>% vfold_cv(v = 4)
+# data transformation / data preparation for the algo
+model_recipe <- TRAIN %>% recipe(Class ~ .)
+```
+
+```{r, echo = FALSE}
+nb_model <-
+  svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+nb_wf <-
+  workflow() %>%
+  add_model(nb_model) %>% 
+  add_recipe(model_recipe)
+
+nb_results <- nb_wf %>% 
+                  tune_grid(resamples = CV,
+                  metrics = metric_set(accuracy))
+
+param_final <- nb_results %>%
+  select_best(metric = "accuracy")
+
+nb_wf <- nb_wf %>%
+  finalize_workflow(param_final)
+
+# Last Fit
+nb_fit <- nb_wf %>% last_fit(SPLIT)
+
+test_performance <- nb_fit %>% collect_predictions()
+
+# Performance Metrics
+diabetes_metrics <- metric_set(accuracy, f_meas, precision, recall)
+
+```
+
+```{r, echo = FALSE}
+res_SVM <- diabetes_metrics(data = test_performance, truth = Class, estimate = .pred_class)
+res_SVM <- res_SVM$.estimate[1]
+cat("accurary SVM = ", res_SVM)
+```
+
+The result is not improved.
